@@ -85,4 +85,6 @@ CMOS/ME clear. J1701's later seating-sensitive failure supports the contact idea
 | 11-08 | Esc boot menu on HDMI showed the order: HDD, SSD, stick | **Cause: the BIOS booted the old HDD first**, and its leftover boot code hung. It wasn't a warm-reboot fault. Fixed by wiping the HDD and installing GRUB on **both** disks. Reboot then took about 85 s |
 | 11-09 | Wake-on-LAN after an Ubuntu shutdown | **Failed.** The NIC's ACPI wake (GLAN) was enabled, but its PCIe root port (RP06, 00:1c.5) wasn't. Enabling both fixed it: it woke 31 s after the packet |
 | 11-09 | CPU benchmark (`server-tools/root/cpubench.sh`) | sysbench cpu: 936 events/s on 1 thread, 5,004 on 8. 7-Zip: 15,641 MIPS. Peak 85 °C, fan 2,700 → 3,700 rpm, back to 53 °C 20 s after the test ended |
-| pending | NVIDIA 390 driver + OpenCL benchmark (`clpeak`) | Not done yet |
+| 11-09 | Wake-on-LAN after a shutdown by the owner, with the fixed service | SSH answered 34 s after the magic packet |
+| 11-09 | NVIDIA 390.157 driver from Ubuntu's prebuilt modules: loaded live first, then checked after a reboot | It loads by itself at boot. OpenCL sees the GTX 560M: 4 compute units at 1,550 MHz, 1.94 GiB |
+| 11-09 | GPU benchmark (`server-tools/root/gpubench.sh`, clpeak) | 581 GFLOPS single precision, 49.6 double, 197 GIOPS integer, 33 GB/s memory, 5.6 GB/s over PCIe 2.0 x16. Peak 64 °C |

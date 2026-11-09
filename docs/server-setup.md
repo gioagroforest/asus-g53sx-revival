@@ -10,6 +10,7 @@
 | Login | SSH, key only |
 | Power-on | Wake-on-LAN |
 | Recovery boot | the diagnostic USB stick, still available as a fallback |
+| GPU | NVIDIA 390.157 driver with OpenCL 1.1 |
 
 Every placeholder in the config files (`aa:bb:cc:dd:ee:ff`, `192.168.0.x`, `ROOT-FS-UUID`, `DATA-FS-UUID`) has to be
 replaced with your own values.
@@ -93,6 +94,7 @@ ISO installer. The steps below were run as individual commands over SSH. This is
 | `etc/ssh/sshd_config.d/10-g53.conf` | root by key only, no passwords over the network |
 | `etc/fstab` | root by UUID, swap file, the HDD with `nofail` |
 | `root/cpubench.sh` | sysbench + 7-Zip benchmark that stops itself if the CPU reaches 92 °C. Needs `apt install sysbench p7zip-full` |
+| `root/gpubench.sh` | clpeak (OpenCL) GPU benchmark that stops itself if the GPU reaches 90 °C. Needs the NVIDIA 390 driver and `clpeak` |
 
 ## Recommended, not yet done
 
@@ -104,28 +106,44 @@ ISO installer. The steps below were run as individual commands over SSH. This is
 - Check the `unattended-upgrades` settings.
 - Remove `nomodeset` once the NVIDIA driver is in, if a console on HDMI is wanted.
 
-## GPU: NVIDIA 390 driver (pending)
+## GPU: NVIDIA 390 driver and OpenCL benchmark
 
-The prebuilt, signed modules avoid DKMS compiling, which is the most common way NVIDIA installs break. The packages
-were checked on kernel 5.15.0-203 and install with no removals:
+Installed on 2026-11-09 from Ubuntu's prebuilt, signed modules, so nothing is compiled. DKMS compiling is the most
+common way NVIDIA installs break. On kernel 5.15.0-203 it added 20 packages and removed none:
 
 ```bash
 apt update
 apt install nvidia-headless-no-dkms-390 nvidia-utils-390 linux-modules-nvidia-390-generic clinfo clpeak
-printf 'blacklist nouveau\noptions nouveau modeset=0\n' > /etc/modprobe.d/blacklist-nouveau.conf
-update-initramfs -u
-reboot
-# after reboot
-nvidia-smi
-clinfo -l
-clpeak            # OpenCL compute and memory bandwidth benchmark
 ```
+
+- **No manual nouveau blacklist is needed.** The packages add `/lib/modprobe.d/nvidia-graphics-drivers.conf`, which
+  blacklists nouveau, and rebuild the initramfs themselves.
+- **It can be tested before any reboot.** With `nomodeset`, nouveau loads but never binds to the card, so
+  `modprobe -r nouveau && modprobe nvidia` works on the running system. `nvidia-smi` and `clinfo -l` then show the
+  **GeForce GTX 560M**: driver 390.157, VBIOS 70.26.29.00.0A, 1,984 MiB, OpenCL 1.1 with 4 compute units at 1,550 MHz.
+- **After a reboot the driver loads by itself:** `nvidia`, `nvidia_uvm`, `nvidia_modeset` and `nvidia_drm`, and no
+  nouveau. `nvidia-persistenced` logs "Failed to query NVIDIA devices" at boot and exits. It is optional, and nothing
+  here needs it.
+- `nvidia-smi` reports the temperature and memory. Power, clocks and utilization show `N/A` on this laptop GPU.
+
+**Benchmark:** [`root/gpubench.sh`](../server-tools/root/gpubench.sh) runs `clpeak` (OpenCL) and stops it if the GPU
+reaches 90 °C. One run, 2 minutes:
+
+| Test | Result | Note |
+|---|---|---|
+| Single precision | **581 GFLOPS** (float2) | 98 % of the peak: 4 compute units × 48 cores × 1,550 MHz × 2 = 595 GFLOPS |
+| Double precision | **49.6 GFLOPS** | 1/12 of that peak, this chip's double-precision rate |
+| Integer | 197 GIOPS | |
+| Memory bandwidth | 33 GB/s (float4) | |
+| Host to GPU transfer | 5.6 GB/s | the PCIe link runs at 5 GT/s (PCIe 2.0) x16 during transfers and drops to 2.5 GT/s when idle |
+| Kernel launch latency | 6.6 µs | |
+| GPU temperature | 48 °C, peak 64 °C, 56 °C 20 s after | the CPU fan went from 100 to 2,700 rpm |
 
 **What to expect for AI:**
 
 - **CUDA:** the newest CUDA toolkit that supports Fermi is **8.0** (2016). Current PyTorch, TensorFlow and llama.cpp
   CUDA builds don't support it.
 - **What does work:** OpenCL 1.1 compute, benchmarks and learning.
-- **Hardware:** 192 CUDA cores, 2 GB GDDR5, about 590 GFLOPS FP32 on paper.
+- **Hardware:** 192 CUDA cores, 2 GB GDDR5, 595 GFLOPS FP32 on paper and 581 measured with OpenCL.
 - **For small language models, the CPU is the realistic path:** llama.cpp runs 1–3 B parameter models on the
   i7-2670QM with its 16 GB of RAM. The CPU has AVX but no AVX2 or FMA, so expect a few tokens per second.

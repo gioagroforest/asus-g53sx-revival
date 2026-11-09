@@ -64,6 +64,8 @@ directly observed. `hypothesis` = an untested explanation.
 | F19 | With no drive attached at boot, the AHCI controller reported no ports, so drives must be connected before power-on | logged | [board facts, SATA](docs/board-facts.md#sata) |
 | F20 | CPU benchmark: sysbench 936 events/s (1 thread), 5,004 (8 threads); 7-Zip 15,641 MIPS; peak 85 °C, cooling recovered to 53 °C within 20 s | logged | run-log, Phase 4 |
 | F21 | Of current distros, only Ubuntu 22.04 packages NVIDIA's last Fermi driver (390) with prebuilt modules | read-from-archive | [server-setup](docs/server-setup.md#why-ubuntu-2204-and-not-2404-or-debian-12) |
+| F22 | NVIDIA 390.157 from those prebuilt modules loads on kernel 5.15.0-203 both live (after `modprobe -r nouveau`, possible because `nomodeset` keeps nouveau unbound) and at boot. The packages blacklist nouveau themselves. OpenCL 1.1 sees 4 compute units at 1,550 MHz and 1.94 GiB | logged | [server-setup, GPU](docs/server-setup.md#gpu-nvidia-390-driver-and-opencl-benchmark) |
+| F23 | clpeak: 581 GFLOPS single precision (98 % of the 595 GFLOPS peak), 49.6 GFLOPS double (1/12), 197 GIOPS integer, 33 GB/s memory, 5.6 GB/s host transfer with the PCIe link at 5 GT/s x16 under load and 2.5 GT/s idle, 6.6 µs launch latency, peak 64 °C | logged, 1 run | [server-setup, GPU](docs/server-setup.md#gpu-nvidia-390-driver-and-opencl-benchmark) |
 
 ## Do not conclude
 
@@ -78,7 +80,7 @@ directly observed. `hypothesis` = an untested explanation.
   (F13). Run 4 used the internal keyboard and recovery didn't start, but recovery needs working RAM, and the same
   fault was blocking USB setup then, so run 4 can't separate a recovery problem from the hardware fault.
 - **That the GTX 560M helps with modern AI.** The newest CUDA for Fermi is 8.0. Current PyTorch and llama.cpp CUDA
-  builds don't support it ([server-setup, GPU](docs/server-setup.md#gpu-nvidia-390-driver-pending)).
+  builds don't support it ([server-setup, GPU](docs/server-setup.md#gpu-nvidia-390-driver-and-opencl-benchmark)).
 
 ## Method pitfalls
 
@@ -112,6 +114,13 @@ ExecStart=/usr/sbin/ethtool -s eth0 wol g
 To check: in `/proc/acpi/wakeup`, the `GLAN` line for `pci:0000:05:00.0` and the `RP06` line should both say
 `*enabled`. A second `GLAN` line with no PCI device stays `*disabled` and doesn't matter.
 
+NVIDIA 390 for the Fermi GPU on Ubuntu 22.04, with nothing compiled, testable before any reboot:
+
+```bash
+apt install nvidia-headless-no-dkms-390 nvidia-utils-390 linux-modules-nvidia-390-generic clinfo clpeak
+modprobe -r nouveau && modprobe nvidia && nvidia-smi   # works live when booted with nomodeset
+```
+
 ext4 for an Ubuntu 22.04 root made with a newer e2fsprogs:
 
 ```bash
@@ -137,7 +146,9 @@ dictionary size and the unpacked length from the 13-byte header, then
   "ram": {"slots_ok": ["J1401", "J1501", "J1601", "J1701"], "memtester_max_gb": 14.4, "note": "J1701 needed one reseat"},
   "panel": "not re-tested",
   "cpu_benchmark": {"sysbench_1t_events_s": 936, "sysbench_8t_events_s": 5004, "7zip_mips": 15641, "peak_c": 85},
-  "gpu_driver": "nvidia 390 not yet installed",
+  "gpu_driver": "nvidia 390.157 from prebuilt modules, loads at boot",
+  "gpu_benchmark_clpeak": {"sp_gflops": 581, "dp_gflops": 49.6, "int_giops": 197, "mem_gb_s": 33, "pcie_gb_s": 5.6,
+                           "pcie_link": "5 GT/s x16 under load, 2.5 GT/s idle", "launch_us": 6.6, "peak_c": 64},
   "bios_recovery_files": {"G53SX": "G53SX.bin", "G53SW": "G53SW.bin"},
   "bios_image_sha256": {"G53SXAS.209": "c0caa35a206d4311716e8691f524bc618aec2d13933d2e78e1fcf3f6486655c7",
                         "G53SWAS.203": "32e3c2022332849b161d684da95f9cccc87d25bacb23dc258aae75c30d654aa0"}
@@ -149,4 +160,3 @@ dictionary size and the unpacked length from the 13-byte header, then
 - Which of the MXM reseat and RAM contact cleared the fault.
 - Whether the internal panel works.
 - The source of the board heat seen with quiet fans on 2026-11-05.
-- NVIDIA 390 driver and OpenCL (`clpeak`) results on the GTX 560M.

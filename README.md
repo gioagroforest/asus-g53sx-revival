@@ -60,7 +60,8 @@ The full timeline is in **[docs/run-log.md](docs/run-log.md)**.
    and Wake-on-LAN worked. RAM tests passed for every slot.
 7. **Day 5, server install.** The drives were tested, the old data was saved, and Ubuntu 22.04 went on without a
    screen or installer, from the diag stick over SSH ([docs/server-setup.md](docs/server-setup.md)).
-8. **Day 6.** A Wake-on-LAN bug under Ubuntu was fixed, and the CPU was benchmarked.
+8. **Day 6.** A Wake-on-LAN bug under Ubuntu was fixed, the CPU was benchmarked, and the GPU got NVIDIA's 390
+   driver: 581 GFLOPS in OpenCL ([server setup](docs/server-setup.md#gpu-nvidia-390-driver-and-opencl-benchmark)).
 
 ## What fixed it
 
@@ -118,7 +119,7 @@ These corrections are kept on purpose. They are the likeliest traps for the next
 | [`docs/`](docs) | [run log](docs/run-log.md), [board facts](docs/board-facts.md) + [board map](docs/board-map.png), [BIOS and firmware](docs/bios-and-firmware.md), [server setup](docs/server-setup.md) |
 | [`diag-stick/`](diag-stick) | Sources for the RAM-only diagnostic Linux USB stick. It's built as root in WSL from a minimal Ubuntu 24.04 (`debootstrap --variant=minbase noble`) plus the stock kernel, trimmed to the drivers this laptop needs. See [`README-stick.txt`](diag-stick/README-stick.txt) and the comments in `build_rootfs.sh`, `make_image.sh` and `init`. The built image is **not** included, because it would contain SSH keys. Build your own with your key. `write_stick.ps1` only writes to a USB disk named `General UDisk` of about 7.5 GB, so edit `$expectedName` and the size check for your stick. `windows-tools/read_stick.ps1` has the same name check |
 | [`server-install/`](server-install) | The chroot installer and the stick GRUB menu used to install Ubuntu 22.04 without a screen |
-| [`server-tools/`](server-tools) | Config files from the finished server: Wake-on-LAN service, netplan, GRUB, fstab, watchdog, SSH, CPU benchmark |
+| [`server-tools/`](server-tools) | Config files from the finished server: Wake-on-LAN service, netplan, GRUB, fstab, watchdog, SSH, CPU and GPU benchmarks |
 | [`server-stick/`](server-stick) | An earlier, **unused** approach: a remastered Ubuntu 24.04 live ISO with SSH, plus an autoinstall file sent over SSH. It was dropped because 24.04 lacks the Fermi GPU driver |
 | [`windows-tools/`](windows-tools) | PowerShell tools for the Windows PC: `wake_asus.ps1` (magic packet), `find_asus.ps1` (finds the laptop by MAC), `watch_lan.ps1` (flags new devices), `read_stick.ps1`, the phone-witness scripts, `connect_asus.cmd` |
 | [`wsl-tools/`](wsl-tools) | WSL scripts: the QEMU control boot, and readers for the partition Ubuntu wrote to the stick |

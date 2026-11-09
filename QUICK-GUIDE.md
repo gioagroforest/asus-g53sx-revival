@@ -53,6 +53,8 @@ Recovery needs working RAM, so it can't fix the fault in step 2.
 - **Remote access:** build the diagnostic stick with your SSH key. It gets an address over Ethernet and accepts SSH.
 - **Server:** install Ubuntu 22.04. Unlike Ubuntu 24.04 and Debian 12, it still packages NVIDIA's driver for this
   Fermi GPU ([server setup](docs/server-setup.md)). Put GRUB on **every** disk, so a wrong boot order can't strand it.
+- **GPU compute:** NVIDIA's 390 driver installs from prebuilt packages, with nothing to compile
+  ([commands](docs/server-setup.md#gpu-nvidia-390-driver-and-opencl-benchmark)). OpenCL works; current CUDA AI frameworks don't.
 - **Wake-on-LAN:** use [`g53-wol.service`](server-tools/etc/systemd/system/g53-wol.service), which also arms the
   network card's PCIe root port. Wake the laptop from a PC on the same network with
   [`wake_asus.ps1`](windows-tools/wake_asus.ps1). It only wakes when the charger is plugged in.
