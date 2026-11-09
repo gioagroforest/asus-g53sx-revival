@@ -1,0 +1,72 @@
+#!/bin/bash
+# Records how far this boot got, on the stick, and keeps every other disk read-only.
+# To allow writes later: sudo touch /run/g53-allow-writes, then blockdev --setrw the disk.
+D=/var/log/g53
+mkdir -p "$D"
+
+protect() {
+    [ -e /run/g53-allow-writes ] && return
+    local d
+    for d in $(lsblk -dnro NAME,TYPE | awk '$2=="disk"{print $1}'); do
+        # Only the stick has anything mounted at this point, so this spares it.
+        lsblk -nro MOUNTPOINTS "/dev/$d" | grep -q . && continue
+        [ "$(blockdev --getro "/dev/$d")" = 1 ] && continue
+        blockdev --setro "/dev/$d" && echo "$(cut -d' ' -f1 /proc/uptime) read-only $d" >> "$D/heartbeat.txt"
+    done
+}
+
+snapshot() {
+    {
+        echo "== uptime"; cat /proc/uptime
+        echo "== cmdline"; cat /proc/cmdline
+        echo "== uname"; uname -a
+        echo "== dmi"; cat /sys/class/dmi/id/{sys_vendor,product_name,bios_version,bios_date} 2>&1
+        echo "== cpu"; grep -m1 'model name' /proc/cpuinfo; grep -c ^processor /proc/cpuinfo
+        echo "== memory"; free -m
+        echo "== pci"; lspci -nnk 2>&1
+        echo "== usb"; lsusb 2>&1
+        echo "== disks"; lsblk -o NAME,SIZE,TYPE,RO,FSTYPE,LABEL,MODEL,MOUNTPOINTS 2>&1
+        echo "== network"; ip -d addr 2>&1; ip route 2>&1
+        echo "== modules"; lsmod 2>&1
+        echo "== failed units"; systemctl --failed --no-pager 2>&1
+        echo "== dmesg"; dmesg 2>&1
+    } > "$D/$1.txt"
+    sync
+}
+
+heartbeat() {
+    local temps carrier f
+    temps=$(cat /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input 2>/dev/null | sort -n | tail -1)
+    carrier=""
+    for f in /sys/class/net/e*; do
+        [ -e "$f" ] && carrier="$carrier $(basename "$f")=$(cat "$f/carrier" 2>/dev/null)"
+    done
+    echo "$(cut -d' ' -f1 /proc/uptime) maxtemp=$temps link:$carrier ip:$(hostname -I 2>/dev/null)" >> "$D/heartbeat.txt"
+    sync
+}
+
+directcable() {
+    # Second address, so a straight cable from another machine works with no router.
+    local f
+    for f in /sys/class/net/e*; do
+        [ -e "$f" ] || continue
+        ip link set "$(basename "$f")" up 2>/dev/null
+        ip addr replace 10.53.53.53/24 dev "$(basename "$f")" 2>/dev/null
+    done
+}
+
+echo "=== boot $(date -u +%FT%TZ) uptime $(cut -d' ' -f1 /proc/uptime)" >> "$D/heartbeat.txt"
+sync
+n=0
+while :; do
+    protect
+    directcable
+    heartbeat
+    case $n in
+        0) snapshot start ;;
+        4) snapshot after-2min ;;
+        20) snapshot after-10min ;;
+    esac
+    n=$((n+1))
+    sleep 30
+done

@@ -1,0 +1,20 @@
+# Settings for the G53 diagnostic stick. Lines are NAME=value.
+
+# Minutes to wait for an SSH login, only if a network link came up.
+HOLD_MINUTES=10
+
+# Size of the quick memory test in MB. 0 turns it off.
+RAM_TEST_MB=256
+
+# Longest time allowed for TESTS/run.sh, in minutes.
+TEST_LIMIT_MINUTES=30
+
+# Load the GPU driver (nouveau) as the very last step. It may freeze the laptop, which is
+# itself a useful answer, because everything else is already saved. 0 turns it off.
+GPU_TEST=1
+
+# Seconds to wait if the GPU driver finds a connected screen, so you can look at it.
+GPU_HOLD_SECONDS=90
+
+# Turn the laptop off when finished. 0 keeps it on with Caps Lock blinking fast.
+POWEROFF=1

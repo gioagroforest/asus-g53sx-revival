@@ -1,0 +1,13 @@
+[Unit]
+Description=Arm Wake-on-LAN (magic packet) on eth0
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# card + the PCIe root port above it (RP06, 00:1c.5) must both be allowed to wake the machine
+ExecStart=/bin/sh -c "for d in /sys/class/net/eth0/device /sys/class/net/eth0/device/..; do echo enabled > $d/power/wakeup; done"
+ExecStart=/usr/sbin/ethtool -s eth0 wol g
+ExecStop=/bin/sh -c "for d in /sys/class/net/eth0/device /sys/class/net/eth0/device/..; do echo enabled > $d/power/wakeup; done"
+ExecStop=/usr/sbin/ethtool -s eth0 wol g
+[Install]
+WantedBy=multi-user.target

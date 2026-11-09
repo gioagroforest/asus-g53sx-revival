@@ -1,0 +1,32 @@
+#cloud-config
+# NOT on the stick. Sent over SSH only after the user has seen the drive and agreed.
+# ERASES the disk with the serial below. install_server.sh fills it in.
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard: {layout: us}
+  timezone: Etc/UTC
+  refresh-installer: {update: false}
+  updates: security
+  identity:
+    hostname: g53s
+    username: g53
+    # No usable password: login is by SSH key only.
+    password: "!"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - __SSH_KEY__
+  storage:
+    layout:
+      name: direct
+      match:
+        serial: __DISK_SERIAL__
+  late-commands:
+    - mkdir -p /target/etc/systemd/logind.conf.d
+    - printf '[Login]\nHandleLidSwitch=ignore\nHandleLidSwitchExternalPower=ignore\nHandleLidSwitchDocked=ignore\n' > /target/etc/systemd/logind.conf.d/g53-lid.conf
+    - curtin in-target -- systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+    - echo 'g53 ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/g53
+    - chmod 440 /target/etc/sudoers.d/g53
+  shutdown: poweroff

@@ -1,0 +1,34 @@
+#!/bin/sh
+# Runs in the initrd, after casper has assembled the live system at /root and bound
+# the stick's "writable" partition over /var/log, and before systemd starts.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in
+prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/casper-functions
+log_begin_msg "Applying G53 headless settings"
+
+cp -r /g53/rootfs/. /root/
+
+# A closed or stuck lid sensor must not suspend a machine nobody can see.
+for t in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
+    ln -sf /dev/null "/root/etc/systemd/system/$t.target"
+done
+
+mkdir -p /root/etc/systemd/system/sysinit.target.wants
+ln -sf /etc/systemd/system/g53-report.service /root/etc/systemd/system/sysinit.target.wants/g53-report.service
+
+# Keeping the journal on the stick is what makes a later freeze readable.
+mkdir -p /root/var/log/journal /root/var/log/g53
+
+# Key-only login with a normal shell. The stock "installer" user opens the installer UI.
+chroot /root useradd -m -s /bin/bash -G sudo,adm g53
+mkdir -p /root/home/g53/.ssh
+cp /g53/authorized_keys /root/home/g53/.ssh/authorized_keys
+chmod 700 /root/home/g53/.ssh
+chmod 600 /root/home/g53/.ssh/authorized_keys
+chroot /root chown -R g53:g53 /home/g53/.ssh
+
+log_end_msg

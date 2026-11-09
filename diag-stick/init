@@ -1,0 +1,559 @@
+#!/bin/bash
+# G53 diagnostic stick: PID 1, running entirely from RAM.
+#
+# Order, saving after every step so that a hang still leaves a trail:
+#   find the stick > hardware report > load drivers one at a time > report again >
+#   network and SSH > RAM test > TESTS/run.sh > hold for SSH > GPU driver > power off.
+#
+# Safety: the only disk ever written is the stick's own G53DIAG partition. Every
+# other disk is set read-only as soon as it appears and is never mounted.
+
+export PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root TERM=linux LANG=C LC_ALL=C
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm /run /tmp /stick
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=755 tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+exec < /dev/console > /dev/console 2>&1
+trap '' HUP PIPE
+hostname g53-diag
+
+VERSION=1
+RAMDIR=/run/diag
+mkdir -p "$RAMDIR"
+RUNDIR=$RAMDIR
+RUNNAME=none
+STICK_OK=0
+STICK_DISK=
+
+# Defaults; /stick/config.txt can override them.
+HOLD_MINUTES=10
+RAM_TEST_MB=256
+TEST_LIMIT_MINUTES=30
+GPU_TEST=1
+GPU_HOLD_SECONDS=90
+POWEROFF=1
+
+uptime_s() { cut -d' ' -f1 /proc/uptime; }
+
+# sync can block forever on a dying USB bus, so never wait for it for long.
+flush() {
+    [ "$STICK_OK" = 1 ] || return 0
+    sync &
+    local p=$! i=0
+    while kill -0 "$p" 2>/dev/null && [ "$i" -lt 150 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+
+say() {
+    local line
+    line="$(printf '%9s' "$(uptime_s)")  $*"
+    echo "$line" >> "$RUNDIR/progress.txt"
+    echo "G53DIAG $line"
+    flush
+}
+
+# run_step <limit seconds> <name> <command...>
+# Records the start before running, so the log shows what was running at a hang.
+# Output goes to <name>.txt, and the script moves on if the step overruns.
+run_step() {
+    local limit=$1 name=$2 p t=0 rc
+    shift 2
+    say "START $name"
+    ( "$@" ) > "$RUNDIR/$name.txt" 2>&1 < /dev/null &
+    p=$!
+    while kill -0 "$p" 2>/dev/null; do
+        sleep 1
+        t=$((t + 1))
+        if [ "$t" -ge "$limit" ]; then
+            say "TIMEOUT $name after ${limit}s, moving on"
+            kill -9 "$p" 2>/dev/null
+            return 1
+        fi
+    done
+    wait "$p"
+    rc=$?
+    say "done $name rc=$rc"
+    return "$rc"
+}
+
+load_mod() {
+    local t=0 p
+    say "modprobe $*"
+    modprobe "$@" >> "$RUNDIR/modprobe.txt" 2>&1 &
+    p=$!
+    while kill -0 "$p" 2>/dev/null; do
+        sleep 0.2
+        t=$((t + 1))
+        if [ "$t" -ge 225 ]; then
+            say "TIMEOUT modprobe $*, this driver may be stuck"
+            return 1
+        fi
+    done
+    wait "$p"
+}
+
+section() {
+    echo
+    echo "===== $* ====="
+    "$@" 2>&1
+}
+
+# ---------- lights ----------
+caps_set() {
+    local d
+    for d in /sys/class/leds/*capslock*; do
+        [ -d "$d" ] || continue
+        echo none > "$d/trigger" 2>/dev/null
+        echo "$1" > "$d/brightness" 2>/dev/null
+    done
+}
+
+backlight_set() {
+    local d=/sys/class/leds/asus::kbd_backlight
+    [ -d "$d" ] && echo "$1" > "$d/brightness" 2>/dev/null
+}
+
+# Slow blink means this program is running. A kernel panic blinks much faster.
+heartbeat() {
+    while [ ! -e "$RAMDIR/stop-heartbeat" ]; do
+        caps_set 1
+        backlight_set 3
+        sleep 1
+        caps_set 0
+        backlight_set 0
+        sleep 1
+    done
+}
+
+# ---------- disks ----------
+protect_disks() {
+    local b d part
+    for b in /sys/block/*; do
+        d=${b##*/}
+        case "$d" in
+            loop*|ram*|zram*) continue ;;
+        esac
+        [ "$d" = "$STICK_DISK" ] && continue
+        for part in "$d" $(cd "$b" 2>/dev/null && ls -d "$d"* 2>/dev/null); do
+            [ -e "/dev/$part" ] || continue
+            if [ "$(blockdev --getro "/dev/$part" 2>/dev/null)" != 1 ]; then
+                blockdev --setro "/dev/$part" && say "set read-only: /dev/$part"
+            fi
+        done
+    done
+}
+
+mount_stick() {
+    local dev="" i n
+    for i in $(seq 1 "$1"); do
+        dev=$(blkid -c /dev/null -L G53DIAG 2>/dev/null)
+        [ -n "$dev" ] && break
+        sleep 1
+    done
+    if [ -z "$dev" ]; then
+        say "stick partition G53DIAG not found"
+        return 1
+    fi
+    STICK_DISK=$(basename "$(readlink -f "/sys/class/block/$(basename "$dev")/..")")
+    blockdev --setrw "/dev/$STICK_DISK" 2>/dev/null
+    blockdev --setrw "$dev" 2>/dev/null
+    if ! mount -t vfat -o rw,noatime,flush "$dev" /stick; then
+        say "could not mount $dev"
+        return 1
+    fi
+    mkdir -p /stick/LOGS
+    n=1
+    while [ -e "/stick/LOGS/run-$(printf '%03d' "$n")" ]; do n=$((n + 1)); done
+    RUNNAME=run-$(printf '%03d' "$n")
+    mkdir -p "/stick/LOGS/$RUNNAME"
+    cp -r "$RAMDIR"/. "/stick/LOGS/$RUNNAME"/ 2>/dev/null
+    RUNDIR=/stick/LOGS/$RUNNAME
+    STICK_OK=1
+    echo "$RUNNAME" > /stick/LOGS/LAST_RUN.txt
+    say "stick mounted from $dev, this is $RUNNAME"
+    return 0
+}
+
+load_config() {
+    [ -f /stick/config.txt ] || return 0
+    tr -d '\r' < /stick/config.txt > /run/config.txt
+    . /run/config.txt
+    say "config: HOLD_MINUTES=$HOLD_MINUTES RAM_TEST_MB=$RAM_TEST_MB GPU_TEST=$GPU_TEST POWEROFF=$POWEROFF"
+}
+
+# ---------- background recorders ----------
+temps_line() {
+    local f n dir
+    printf '%9s' "$(uptime_s)"
+    for f in /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/fan*_input /sys/class/thermal/thermal_zone*/temp; do
+        [ -r "$f" ] || continue
+        dir=$(dirname "$f")
+        n=$(cat "$dir/name" 2>/dev/null || cat "$dir/type" 2>/dev/null)
+        printf ' %s/%s=%s' "$n" "$(basename "$f")" "$(cat "$f" 2>/dev/null)"
+    done
+    echo
+}
+
+start_recorders() {
+    dmesg --follow > "$RUNDIR/dmesg-live.txt" 2>&1 &
+    ( while :; do temps_line >> "$RUNDIR/temps.txt"; sleep 30; done ) &
+    # Keeps the live kernel log on the stick, so the last lines survive a freeze.
+    if [ "$STICK_OK" = 1 ]; then
+        ( while :; do sync; sleep 5; done ) &
+    fi
+}
+
+# ---------- reports ----------
+report_first() {
+    section uname -a
+    section cat /proc/cmdline
+    echo
+    echo "firmware mode: $([ -d /sys/firmware/efi ] && echo UEFI || echo legacy BIOS)"
+    section lscpu
+    section cat /proc/meminfo
+    section lspci -nn
+    section lspci -tv
+    section lsusb
+    section lsusb -t
+}
+
+report_firmware() {
+    section dmidecode
+}
+
+report_after_drivers() {
+    section lsmod
+    section lspci -nnk
+    section lspci -vvnn
+    section lsblk -o NAME,SIZE,TYPE,RO,RM,FSTYPE,LABEL,MODEL,SERIAL
+    section blkid -c /dev/null
+    section fdisk -l
+    section ip -d link
+    section rfkill list
+    section sensors
+    section ls -l /sys/class/leds
+    section ls -l /sys/class/drm
+    echo
+    echo "===== lid ====="
+    cat /proc/acpi/button/lid/*/state 2>&1
+    echo
+    echo "===== power supplies ====="
+    local f
+    for f in /sys/class/power_supply/*/uevent; do
+        [ -r "$f" ] && { echo "--- $f"; cat "$f"; }
+    done
+    return 0
+}
+
+report_disks() {
+    local b d
+    for b in /sys/block/*; do
+        d=${b##*/}
+        case "$d" in
+            loop*|ram*|zram*) continue ;;
+        esac
+        [ "$d" = "$STICK_DISK" ] && continue
+        section smartctl -a "/dev/$d"
+        section hdparm -I "/dev/$d"
+    done
+}
+
+report_ram_slots() {
+    section dmidecode -t 16 -t 17
+    load_mod i2c-i801
+    load_mod at24
+    section decode-dimms
+}
+
+report_hardware_list() {
+    section lshw
+}
+
+# Walks every device the kernel can see and loads its driver, one at a time, each
+# logged first. The GPU driver is held back until the very end. -b respects Ubuntu's
+# blacklists, which keep out things like watchdog timers, and each driver is tried once.
+load_all_drivers() {
+    local pass alias m
+    : > /run/tried-modules
+    for pass in 1 2 3; do
+        find /sys/devices -name modalias 2>/dev/null | while read -r f; do
+            cat "$f" 2>/dev/null
+        done | sort -u > "/run/aliases.$pass"
+        while read -r alias; do
+            for m in $(modprobe -R "$alias" 2>/dev/null); do
+                [ -d "/sys/module/$m" ] && continue
+                grep -qx "$m" /run/tried-modules && continue
+                echo "$m" >> /run/tried-modules
+                case "$m" in
+                    nouveau|nvidiafb|rivafb)
+                        say "held back $m until the end"
+                        continue
+                        ;;
+                    floppy|parport_pc|evbug)
+                        say "skipped $m"
+                        continue
+                        ;;
+                esac
+                load_mod -b "$m"
+            done
+        done < "/run/aliases.$pass"
+        protect_disks
+        sleep 2
+    done
+}
+
+# ---------- network ----------
+net_up() {
+    local i name t mac drv
+    ip link set lo up
+    for i in /sys/class/net/*; do
+        name=${i##*/}
+        [ "$name" = lo ] && continue
+        [ -d "$i/wireless" ] && continue
+        mac=$(cat "$i/address" 2>/dev/null)
+        drv=$(basename "$(readlink -f "$i/device/driver" 2>/dev/null)")
+        echo "----- $name driver=$drv mac=$mac"
+        ip link set "$name" up
+        t=0
+        while [ "$(cat "$i/carrier" 2>/dev/null)" != 1 ] && [ "$t" -lt 25 ]; do
+            sleep 1
+            t=$((t + 1))
+        done
+        # A fixed address too, for a direct cable to another laptop with no router.
+        ip addr add 10.53.53.53/24 dev "$name" 2>/dev/null
+        if [ "$(cat "$i/carrier" 2>/dev/null)" = 1 ]; then
+            say "LINK UP on $name ($drv, $mac) after ${t}s"
+            touch "$RAMDIR/has-link"
+            busybox udhcpc -i "$name" -f -q -n -t 6 -T 3 -x hostname:g53-diag -s /usr/local/sbin/udhcpc.script
+            ip addr add 10.53.53.53/24 dev "$name" 2>/dev/null
+        else
+            say "NO LINK on $name ($drv, $mac) after ${t}s: the cable, the far port or this port"
+        fi
+        section ethtool "$name"
+        section ethtool -i "$name"
+        section ip addr show "$name"
+    done
+    ls /sys/class/net | grep -qv '^lo$' || say "NO network devices found at all"
+    section ip route
+}
+
+wifi_check() {
+    local i name
+    section rfkill list
+    rfkill unblock all 2>&1
+    for i in /sys/class/net/*; do
+        [ -d "$i/wireless" ] || continue
+        name=${i##*/}
+        echo "----- $name driver=$(basename "$(readlink -f "$i/device/driver" 2>/dev/null)") mac=$(cat "$i/address" 2>/dev/null)"
+        ip link set "$name" up
+        section iw dev "$name" info
+        echo "networks heard: $(timeout 30 iw dev "$name" scan 2>/dev/null | grep -c '^BSS ')"
+        if [ -f /stick/wifi.conf ]; then
+            tr -d '\r' < /stick/wifi.conf > /run/wifi.conf
+            wpa_supplicant -B -i "$name" -c /run/wifi.conf
+            sleep 20
+            section iw dev "$name" link
+            busybox udhcpc -i "$name" -f -q -n -t 6 -T 3 -x hostname:g53-diag -s /usr/local/sbin/udhcpc.script && touch "$RAMDIR/has-link"
+            section ip addr show "$name"
+            rm -f /run/wifi.conf
+        fi
+    done
+}
+
+start_ssh() {
+    mkdir -p /run/sshd
+    /usr/sbin/sshd -E "$RUNDIR/sshd.txt" && say "SSH server started"
+}
+
+ssh_session_active() {
+    pgrep -f 'sshd: root' > /dev/null 2>&1
+}
+
+# Waits for a login only if there is a link at all. To keep the laptop on during
+# an SSH session, either stay logged in or create /run/diag/keep-on.
+hold_for_ssh() {
+    if [ ! -e "$RAMDIR/has-link" ]; then
+        say "no link, skipping the wait for SSH"
+        return 0
+    fi
+    local left=$((HOLD_MINUTES * 60))
+    say "waiting up to $HOLD_MINUTES min for SSH, addresses: $(tr '\n' ' ' < "$RAMDIR/addresses" 2>/dev/null) 10.53.53.53"
+    while [ "$left" -gt 0 ] || [ -e "$RAMDIR/keep-on" ] || ssh_session_active; do
+        sleep 10
+        left=$((left - 10))
+    done
+    say "finished waiting for SSH"
+}
+
+# ---------- tests ----------
+ram_test() {
+    [ "$RAM_TEST_MB" -gt 0 ] 2>/dev/null || { echo "RAM test turned off"; return 0; }
+    memtester "${RAM_TEST_MB}M" 1
+}
+
+run_user_tests() {
+    [ -f /stick/TESTS/run.sh ] || { echo "no TESTS/run.sh on the stick"; return 0; }
+    tr -d '\r' < /stick/TESTS/run.sh > /run/user-tests.sh
+    export RUNDIR RUNNAME
+    bash /run/user-tests.sh
+}
+
+gpu_report() {
+    local c
+    section lspci -vvnn -d 10de:
+    section ls -l /sys/class/drm
+    for c in /sys/class/drm/card*-*; do
+        [ -d "$c" ] || continue
+        echo
+        echo "----- ${c##*/}: status=$(cat "$c/status" 2>/dev/null) enabled=$(cat "$c/enabled" 2>/dev/null)"
+        cat "$c/modes" 2>/dev/null
+        [ -s "$c/edid" ] && edid-decode < "$c/edid" 2>&1
+    done
+    echo
+    echo "===== kernel messages about the GPU ====="
+    dmesg | grep -iE 'nouveau|nvidia|drm|fermi|vga'
+}
+
+gpu_test() {
+    if [ "$GPU_TEST" != 1 ]; then
+        say "GPU test turned off in config.txt"
+        return 0
+    fi
+    run_step 60 gpu-before gpu_report
+    # Saves the kernel log every second, so a freeze here still leaves its last lines.
+    ( while :; do dmesg > "$RUNDIR/dmesg-gpu.txt" 2>&1; sync; sleep 1; done ) &
+    local snapshots=$!
+    say "ABOUT TO LOAD THE GPU DRIVER. If the log stops here, this driver froze the laptop."
+    load_mod nouveau modeset=1
+    say "the GPU driver call returned, rc=$?"
+    sleep 10
+    kill "$snapshots" 2>/dev/null
+    run_step 60 gpu-after gpu_report
+    # A real output only: UEFI's plain framebuffer also reports itself as connected.
+    if grep -qE '^----- card[0-9]+-(HDMI|VGA|LVDS|DVI|DP|eDP)[^:]*: status=connected' "$RUNDIR/gpu-after.txt" 2>/dev/null; then
+        say "the GPU sees a connected display, holding for ${GPU_HOLD_SECONDS}s"
+        local t=0
+        while [ "$t" -lt "$GPU_HOLD_SECONDS" ]; do
+            echo "G53 DIAGNOSTIC STICK: if you can read this on a screen, the GPU works. $t s"
+            sleep 5
+            t=$((t + 5))
+        done
+    fi
+}
+
+make_summary() {
+    echo "G53 diagnostic summary"
+    echo "run:      $RUNNAME, program version $VERSION, uptime $(uptime_s) s"
+    echo "kernel:   $(uname -r), firmware mode: $([ -d /sys/firmware/efi ] && echo UEFI || echo legacy BIOS)"
+    echo "machine:  $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) $(cat /sys/class/dmi/id/product_name 2>/dev/null), BIOS $(cat /sys/class/dmi/id/bios_version 2>/dev/null) $(cat /sys/class/dmi/id/bios_date 2>/dev/null)"
+    echo "cpu:      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
+    echo "memory:   $(awk '/MemTotal/ {printf "%.1f GB", $2 / 1048576}' /proc/meminfo)"
+    echo "lid:      $(cat /proc/acpi/button/lid/*/state 2>/dev/null | tr -s ' ')"
+    echo
+    echo "graphics:"
+    lspci -nn | grep -Ei 'vga|3d|display'
+    echo
+    echo "network:"
+    grep -hE 'LINK UP|NO LINK|NO network' "$RUNDIR/progress.txt"
+    cat "$RAMDIR/addresses" 2>/dev/null
+    echo
+    echo "disks:"
+    lsblk -d -o NAME,SIZE,RO,MODEL
+    echo
+    echo "latest temperatures and fans:"
+    temps_line
+    echo
+    echo "kernel errors:"
+    dmesg -l emerg,alert,crit,err | head -60
+    echo
+    echo "steps that timed out:"
+    grep TIMEOUT "$RUNDIR/progress.txt" || echo "none"
+}
+
+finish() {
+    run_step 60 SUMMARY make_summary
+    cp "$RAMDIR/addresses" "$RUNDIR/addresses.txt" 2>/dev/null
+    say "FINISHED"
+    touch "$RUNDIR/FINISHED.txt"
+    flush
+    pkill -f 'dmesg --follow' 2>/dev/null
+    touch "$RAMDIR/stop-heartbeat"
+    sync
+    if [ "$STICK_OK" = 1 ]; then
+        cd /
+        umount /stick 2>/dev/null || mount -o remount,ro /stick 2>/dev/null
+    fi
+    sync
+    local i
+    for i in 1 2 3 4 5; do
+        caps_set 1
+        sleep 0.15
+        caps_set 0
+        sleep 0.15
+    done
+    if [ "$POWEROFF" = 1 ]; then
+        echo "G53DIAG powering off"
+        busybox poweroff -f
+        sleep 15
+    fi
+    # Power-off failed or is turned off: rapid blink means it is safe to pull the stick.
+    while :; do
+        caps_set 1
+        sleep 0.3
+        caps_set 0
+        sleep 0.3
+    done
+}
+
+main() {
+    say "G53 diagnostics version $VERSION started, kernel $(uname -r)"
+    load_mod input-leds
+    heartbeat &
+
+    load_mod xhci-pci
+    load_mod usb-storage
+    load_mod uas
+    load_mod sd_mod
+    load_mod nls_iso8859_1
+    mount_stick 90 || say "carrying on without the stick; results stay in RAM for now"
+    protect_disks
+    load_config
+    start_recorders
+
+    run_step 60 report-first report_first
+    run_step 60 report-firmware report_firmware
+
+    say "loading drivers one at a time, GPU driver held back"
+    load_all_drivers
+    say "drivers done"
+    protect_disks
+
+    if [ "$STICK_OK" != 1 ]; then
+        mount_stick 30 && { protect_disks; load_config; start_recorders; }
+    fi
+
+    run_step 120 report-after-drivers report_after_drivers
+    run_step 120 report-disks report_disks
+    run_step 60 report-ram-slots report_ram_slots
+    run_step 120 report-hardware-list report_hardware_list
+
+    run_step 180 network net_up
+    run_step 120 wifi wifi_check
+    start_ssh
+
+    run_step 600 ram-test ram_test
+    run_step "$((TEST_LIMIT_MINUTES * 60))" user-tests run_user_tests
+    hold_for_ssh
+    gpu_test
+    finish
+}
+
+main
+while :; do sleep 3600; done

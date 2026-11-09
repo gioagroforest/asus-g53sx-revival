@@ -1,0 +1,12 @@
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    lan:
+      match:
+        macaddress: "aa:bb:cc:dd:ee:ff"
+      set-name: eth0
+      dhcp4: true
+      dhcp-identifier: mac
+      addresses: [10.53.53.53/24]
+      wakeonlan: true

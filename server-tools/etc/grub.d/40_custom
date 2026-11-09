@@ -1,0 +1,13 @@
+#!/bin/sh
+exec tail -n +3 $0
+# This file provides an easy way to add custom menu entries.  Simply type the
+# menu entries you want to add after this comment.  Be careful not to change
+# the 'exec tail' line above.
+
+menuentry "G53 diagnostics (USB stick)" --id g53diag {
+    insmod part_msdos
+    insmod fat
+    search --no-floppy --file --set=root /diag/vmlinuz
+    linux /diag/vmlinuz nomodeset panic=0 ignore_loglevel consoleblank=0
+    initrd /diag/initrd.zst
+}

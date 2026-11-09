@@ -1,0 +1,11 @@
+[Unit]
+Description=G53 evidence log and disk guard
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/g53-report
+
+[Install]
+WantedBy=sysinit.target

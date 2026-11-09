@@ -1,0 +1,30 @@
+# Built images and downloads: rebuild or download them with the steps in README.md
+*.img
+*.iso
+*.iso.sha256
+*.zip
+*.rar
+# ASUS's own files, kept out of this repo on purpose (see README "Not included, on purpose")
+*.bin
+*.fz
+*.ASC
+*.asc
+*BOM*.txt
+G53S[WX]AS.*
+# Secrets and machine-specific files
+*known_hosts*
+id_*
+!id_*.md
+*.pem
+*.key
+*password*.txt
+rootpw
+authorized_keys
+# Run output and evidence from a real machine
+*.log
+LOGS/
+stick-evidence/
+*.jsonl
+# Python
+__pycache__/
+*.pyc
